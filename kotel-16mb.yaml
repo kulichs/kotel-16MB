@@ -1,0 +1,1457 @@
+substitutions:
+  <<: !include common/substitutions_iot_base.yaml
+  devicename: 'kotel-16mb'
+  wifi_ip: '10.10.20.10'
+  verze: "1.5.1" # Zde vzdy po editaci prepis verzi
+  # Ostatni pro kotel
+  cas_serva: 1500ms # Cas sepnuti serva na topeni
+
+esphome:
+  name: $devicename
+  build_path: build/$devicename
+  project:
+    name: "kulich.kotel-16MB"
+    version: $verze
+  on_boot:
+  # buzzer on on startup # pri startu zahraje znelku Star Wars
+    priority: -100
+    then:
+      - rtttl.play: ‘StarWars:d=4,o=5,b=45:32p,32f#,32f#,32f#,8b.,8f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32e6,8c#.6,32f#,32f#,32f#,8b.,8f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32c#6,8b.6,16f#.6,32e6,32d#6,32e6,8c#6'
+
+esp32:
+  board: esp-wrover-kit
+  framework:
+    type: arduino
+  flash_size: 16MB
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/ssieb/esphome_components
+    components: [ serial ]
+
+packages:
+  wifi: !include common/config_wifi_iot_static_ip.yaml
+  ota: !include common/config_ota.yaml
+  #web_server: !include common/config_web_server.yaml
+  mqtt: !include common/mqtt_config_base.yaml
+  #api: !include common/api_config_base.yaml
+  
+api:
+  #password: !secret api_password
+  encryption:
+    key: !secret api_key
+  reboot_timeout: 0s
+  services:
+    - service: update_nextion # povolime vzadeleny update nextionu v HASSIO - vyvojarske nastroje-  sluzby
+      then:
+        - lambda: 'id(nextion1)->upload_tft();'
+  
+logger:
+  baud_rate: 0
+#  level: DEBUG
+
+output:
+  - platform: ledc
+    pin: GPIO4
+    id: rtttl_out
+
+rtttl:
+  output: rtttl_out
+
+  
+preferences:
+  # jak casto mají se zapisovat data do flah, vychozi je 1min
+  flash_write_interval: 1min
+
+globals:
+  # verze
+  - id: verze
+    type: std::string
+    restore_value: no
+    initial_value: '"$verze"'
+    
+  # vychozi hodmota pro topeni end
+  - id: topeni_end
+    type: float
+    restore_value: yes
+    initial_value: '15'
+  
+  # vychozi hodnota pro vypnute topeni manual pokud false (topeni_end) je nefunkcni  
+  - id: topeni_end_man
+    type: boolean
+    restore_value: yes
+    initial_value: 'true'
+    
+  # vychozi hodnota max teploty
+  - id: topeni_max
+    type: float
+    restore_value: yes
+    initial_value: '45'
+    
+  # vychozi hodnota min teploty
+  - id: topeni_min
+    type: float
+    restore_value: yes
+    initial_value: '32'
+    
+  # nastaveni krivky
+  - id: ekvitermaA
+    type: float
+    restore_value: yes
+    initial_value: '8'
+  
+  - id: ekvitermaB
+    type: float
+    restore_value: yes
+    initial_value: '0.5'
+  
+  - id: ekvitermaC
+    type: float
+    restore_value: yes
+    initial_value: '-0.006'
+    
+  - id: hystersion
+    type: int
+    restore_value: no
+    initial_value: '1'
+    
+  - id: ekvitermaDen
+    type: float
+    restore_value: yes
+    initial_value: '8'
+    
+  - id: ekvitermaNoc
+    type: float
+    restore_value: yes
+    initial_value: '3'
+  
+  - id: temp_termostats
+    type: float
+    restore_value: no
+    initial_value: '22.0'
+    
+  #---- hodnoty pro casovac topeni den noc--------
+  - id: hod_den
+    type: int
+    restore_value: yes
+    initial_value: '5'
+    
+  - id: min_den
+    type: int
+    restore_value: yes
+    initial_value: '0'
+    
+  - id: hod_noc
+    type: int
+    restore_value: yes
+    initial_value: '20'
+    
+  - id: min_noc
+    type: int
+    restore_value: yes
+    initial_value: '0'
+    
+
+#------------- casovy server --------
+time:
+  - platform: sntp
+    id: sntp_time
+    servers: ${time_servers}
+    timezone: ${time_zone}
+
+interval:
+  #--------------- rizeni topeni ----------------------------
+  - interval: 30s
+    then:
+      - script.execute: script_math_ekviterm
+      - lambda: |-
+          ESP_LOGD("main", "EkvitermA je: %f", id(ekvitermaA));
+          ESP_LOGD("main", "Zacatek interval 30s");
+          if (id(topeni_zap).state == true) {  // jenom kdyz je zapnute topeni
+            if((id(tst).state + id(hystersion)) < id(ekviterm_math).state ) {
+              id(servo_otevrit).turn_on();
+              id(nextion1).set_component_pic("kotel.picduomix", 1);// zobrazeni stavu duomixu na nextion
+              id(nextion1).set_component_pic("hlavni.picduomix", 1);// zobrazeni stavu duomixu na nextion
+              //ESP_LOGD("main", "servo on");
+            }
+            else if ((id(tst).state - id(hystersion)) > id(ekviterm_math).state ) {
+              id(servo_zavrit).turn_on();
+              id(nextion1).set_component_pic("kotel.picduomix", 2);// zobrazeni stavu duomixu na nextion
+              id(nextion1).set_component_pic("hlavni.picduomix", 2);// zobrazeni stavu duomixu na nextion
+              //ESP_LOGD("main", "Servo off");
+            }
+          }
+          // ------------ zde automatika pro prepinani krivky DEN NOC -------------
+          //ESP_LOGD("main", "cas kontrola");
+          if (id(topeni_zap).state == true) {  // jenom kdyz je zapnute topeni
+            auto time = id(sntp_time).now();
+            if (time.hour == id(hod_den) and time.minute == id(min_den)) {
+              id(topeni_dn).publish_state(true);
+              ESP_LOGD("main", "topeni den");
+            }
+            else if (time.hour == id(hod_noc) and time.minute == id(min_noc)) {
+              id(topeni_dn).publish_state(false);
+              ESP_LOGD("main", "topeni noc");
+            }
+          }
+          ESP_LOGD("main", "Konec interval 30s");          
+  
+  #---- interval 1 minuta
+  #----- vypnuti topeni pri vysoke venkovni teplote a zapnuti pri nizeke------        
+  - interval: 1min
+    then:
+      lambda: |-
+        ESP_LOGD("main", "Zacatek interval 1min");
+        // ------------ Start skript topeni END -------------
+        if (id(topeni_end_man) == true) {
+          ESP_LOGD("main", "Venkovni teplota je: %f", id(vnt).state);
+          if (id(vnt).state >= id(topeni_end)) {
+            id(topeni_zap).publish_state(false);
+            //ESP_LOGD("main", "topeni off");
+          }
+          else if (id(vnt).state < id(topeni_end)) {
+            id(topeni_zap).publish_state(true);
+            //ESP_LOGD("main", "topeni on");
+          }
+        }
+        // ------------- Konec skriptu topeni END ----------------
+        ESP_LOGD("main", "Konec interval 1min");
+        
+
+script:
+  - id: script_math_ekviterm
+    then:
+      - lambda: |-
+                    id(ekviterm_math).publish_state(min(id(topeni_max), max(id(topeni_min), id(temp_termostats) + id(ekvitermaA) +id(ekvitermaB) * ((id(temp_termostats) - id(vnt).state) + id(ekvitermaC) * ((id(temp_termostats) - id(vnt).state) * (id(temp_termostats) - id(vnt).state))))));
+
+
+# serial port kde je pripojen nextion display a attyna84   
+uart:
+  - id: uartnext
+    rx_pin: GPIO03
+    tx_pin: GPIO01
+    baud_rate: 115200
+
+  - id: uartattyna
+    rx_pin: GPIO14 # pro 16MB verzi , pro 4MB verzi GPIO16
+    tx_pin: GPIO15 # pro 16MB verzi , pro 4MB verzi GPIO17
+    baud_rate: 9600
+
+# I2C port piny
+#i2c:
+#  sda: GPIO21
+#  scl: GPIO22
+
+# hub pro dalsich 8 rele  
+#pcf8574:
+#  - id: pcf8574hub
+#    address: 0x21
+#    pcf8575: false
+
+status_led:
+  pin: GPIO2
+
+
+
+sensor:
+    # Sila WiFi signalu
+  - platform: wifi_signal
+    name: "${devicename} Wifi signal"
+    id: wifisignal
+    update_interval: 60s
+    #internal: true
+    on_value:
+      then:
+        - lambda: 'id(nextion1).set_component_text_printf("nastaveni.wifisignal", "RSSI: %.0f", id(wifisignal).state);'
+        
+  - platform: template
+    name: ekviterm math
+    id: ekviterm_math
+    accuracy_decimals: 0
+    unit_of_measurement: "°C"
+    
+    # Cas po poslednim restartu
+   # uptime zarizeni      
+  - platform: uptime
+    name: Uptime Sensor
+    id: uptime_sensor
+    update_interval: 60s
+    on_raw_value:
+      then:
+        - text_sensor.template.publish:
+            id: uptime_human
+            state: !lambda |-
+              int seconds = round(id(uptime_sensor).raw_state);
+              int days = seconds / (24 * 3600);
+              seconds = seconds % (24 * 3600);
+              int hours = seconds / 3600;
+              seconds = seconds % 3600;
+              int minutes = seconds /  60;
+              seconds = seconds % 60;
+              return (
+                (days ? to_string(days) + "d " : "") +
+                (hours ? to_string(hours) + "h " : "") +
+                (minutes ? to_string(minutes) + "m " : "") +
+                (to_string(seconds) + "s")
+              ).c_str();
+
+  # ----- Template pro MAX9975 -----
+  - platform: template
+    name: "Spaliny"
+    id: aspaliny
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 10
+          max_value: 400
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("kotel.spaliny", "%.1f", id(aspaliny).state);
+
+  # ----- Template pro DS18B20 -----
+  # -- Filtr clamp uprav dle mericiho bodu --
+  # -- Filtr timeout hlida preruseni cidla kdyz neposle data 3min tak da hodnotu NaN jako chyba --
+  - platform: template
+    name: "Topeni spatecka"
+    id: tsp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("hlavni.tspatecka", "%.1f", id(tsp).state);
+
+  - platform: template
+    name: "Topeni stoupacka"
+    id: tst
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("hlavni.tstoupacka", "%.1f", id(tst).state);
+
+  - platform: template
+    name: "Kotel spatecka"
+    id: ksp
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("hlavni.kspatecka", "%.1f", id(ksp).state);
+
+  - platform: template
+    name: "Kotel stoupacka"
+    id: kst
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+      - filter_out: 85.0
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("hlavni.kstoupacka", "%.1f", id(kst).state);
+
+  - platform: template
+    name: "Aku spatecka"
+    id: aspat
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.akuspa", "%.1f", id(aspat).state);
+
+  - platform: template
+    name: "Aku stoupacka"
+    id: astou
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.akustou", "%.1f", id(astou).state);
+
+  - platform: template
+    name: "Aku pravá nahoře"
+    id: apv
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.aku2vrch", "%.1f", id(apv).state);
+
+  - platform: template
+    name: "Aku pravá střed"
+    id: aps
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.aku2stred", "%.1f", id(aps).state);
+
+  - platform: template
+    name: "Aku pravá dole"
+    id: apd
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.aku2spodek", "%.1f", id(apd).state);
+
+  - platform: template
+    name: "Aku levá nahoře"
+    id: alv
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.aku1vrch", "%.1f", id(alv).state);
+
+  - platform: template
+    name: "Aku levá střed"
+    id: als
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.aku1stred", "%.1f", id(als).state);
+
+  - platform: template
+    name: "Aku levá dole"
+    id: ald
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.aku1spodek", "%.1f", id(ald).state);
+
+  - platform: template
+    name: "Aku do bojleru"
+    id: avr
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("aku.tepprobojler", "%.1f", id(avr).state); 
+   
+  - platform: template
+    name: "Bojler"
+    id: bo
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("hlavni.tbojler", "%.1f", id(bo).state);
+
+  - platform: template
+    name: "Teplá voda"
+    id: tvb
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: 5
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("hlavni.tvoda", "%.1f", id(tvb).state);
+
+  - platform: template
+    name: "Venkovní teplota"
+    id: vnt
+    unit_of_measurement: "°C"
+    device_class: temperature
+    filters:
+      - clamp:
+          min_value: -50
+          max_value: 125
+          ignore_out_of_range: true
+      - timeout:
+          timeout: 3min  # Po 3 minutach NaN hodnota
+    on_value:
+      then:
+        lambda: |-
+          id(nextion1).set_component_text_printf("hlavni.vteplota", "%.1f", id(vnt).state);
+
+          
+#--------------------------------------NEXTION---------------------------------------------  
+display:
+  - platform: nextion
+    id: nextion1
+    uart_id: uartnext
+    tft_url: http://192.168.223.8:8123/local/tft/kotel_next.tft # web adresa kde je ulozen soubor tft pro update nextionu
+    update_interval: 30s
+    lambda: |-
+      auto date = id(sntp_time).now().strftime("%d-%m-%Y");
+      auto time = id(sntp_time).now();
+      
+      it.set_component_text_printf("hlavni.time","%02d:%02d",time.hour,time.minute);
+      it.set_component_text("hlavni.date", date.c_str());
+      it.set_component_text_printf("nastaveni.ipadresa", "IP: %s", id(espipadresa).state.c_str());
+      it.set_component_text_printf("nastaveni.g0", "ESPHome verze: %s", id(esphomeverze).state.c_str());
+      it.set_component_text_printf("nastaveni.verze", "Kotel verze: %s", id(verze).c_str());
+      
+      id(nextion1).set_component_value("topeni.teplotaend", id(topeni_end));
+      id(nextion1).set_component_value("topeni.teplotamax", id(topeni_max));
+      id(nextion1).set_component_value("topeni.teplotamin", id(topeni_min));
+      id(nextion1).set_component_value("topeni.krivkaden", id(ekvitermaDen));
+      id(nextion1).set_component_value("topenicas.krivkanoc", id(ekvitermaNoc));
+      id(nextion1).set_component_value("topenicas.hodden", id(hod_den));
+      id(nextion1).set_component_value("topenicas.minden", id(min_den));
+      id(nextion1).set_component_value("topenicas.hodnoc", id(hod_noc));
+      id(nextion1).set_component_value("topenicas.minnoc", id(min_noc));
+
+#------------------------- text sensor---------------------------------------------------
+text_sensor:
+  - <<: !include common/text_sensor/wifi_info.yaml
+  - <<: !include common/text_sensor/version.yaml
+  - <<: !include common/text_sensor/template.yaml
+  
+  # Prijem dat teplotnich cidel z attiny84a
+  - platform: serial
+    uart_id: uartattyna
+    name: AttinaData
+    id: attdata
+    on_value:
+      then:
+        - lambda: |-
+            std::string received_str = x.c_str();  // Příjem textu ze sériové linky
+
+            // Inicializace proměnných pro ID a teplotu
+            char sensorID[3];
+            float sensorTEMP;
+
+            // Parsování ve formátu hex:teplota
+            if (sscanf(received_str.c_str(), "%2[^:]:%f", sensorID, &sensorTEMP) == 2) {
+              //ESP_LOGI("serial", "Přijatý sensor ID: %s", sensorID);
+              //ESP_LOGI("serial", "Přijatá teplota: %.2f", sensorTEMP);
+              
+              // Rozdělení podle hexadecimálního ID
+              if (strcmp(sensorID, "99") == 0) {  // Teplomer Spalin
+                id(aspaliny).publish_state(sensorTEMP); // jeste osetrit chyb hodnotu a nebo v template
+
+                // Zde cidla DS18B20
+              } else if (strcmp(sensorID, "25") == 0) { 
+                  id(tsp).publish_state(sensorTEMP);
+
+              } else if (strcmp(sensorID, "24") == 0) {  
+                  id(tst).publish_state(sensorTEMP);
+
+              } else if (strcmp(sensorID, "20") == 0) {  
+                  id(ksp).publish_state(sensorTEMP);
+
+              } else if (strcmp(sensorID, "21") == 0) {  
+                  id(kst).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "23") == 0) {  
+                  id(aspat).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "6") == 0) {  
+                  id(ald).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "5") == 0) {  
+                  id(als).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "4") == 0) {  
+                  id(alv).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "3") == 0) {  
+                  id(avr).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "2") == 0) {  
+                  id(apd).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "1") == 0) {  
+                  id(aps).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "0") == 0) {  
+                  id(apv).publish_state(sensorTEMP);
+                  
+              } else if (strcmp(sensorID, "7") == 0) {  
+                  id(bo).publish_state(sensorTEMP);
+
+              } else if (strcmp(sensorID, "26") == 0) {  
+                  id(tvb).publish_state(sensorTEMP);
+
+              } else if (strcmp(sensorID, "22") == 0) {  
+                  id(vnt).publish_state(sensorTEMP);
+
+              } else if (strcmp(sensorID, "27") == 0) {  
+                  id(astou).publish_state(sensorTEMP);
+
+              }
+            }  
+
+  
+#-------------------------binary sensor-------------------------------------------------      
+binary_sensor:
+  - platform: status
+    name: "${devicename} Stav"
+  #---------- Topeni ZAP/VYP pres Nextion-----------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 8
+    id: zapvypt
+    on_press: # vypne topeni
+      then:
+        - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+        - lambda: |-
+            id(topeni_zap).publish_state(false);
+            id(topeni_end_man) = false;          
+    on_release: # zapne topeni
+      then:
+        - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+        - lambda: |-
+            id(topeni_zap).publish_state(true);
+            id(topeni_end_man) = true;
+                    
+  #---------- Topeni DEN/NOC pres Nextion-----------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 36
+    id: tdennoc
+    on_press: # den topeni
+      then:
+        - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+        - lambda: |-
+            id(topeni_dn).publish_state(false);
+    on_release: # noc topeni
+      then:
+        - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+        - lambda: |-
+            id(topeni_dn).publish_state(true);
+
+  #---------- Topeni END teplota -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 4
+    id: tend_plus
+    on_press:
+      then:
+      # zavolame button template topeni end plus
+       - button.press: top_end_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 3
+    id: tend_minus
+    on_press:
+      then:
+      # zavolame button template topeni end minus
+       - button.press: top_end_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+       
+  #---------- Topeni MAX teplota -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 9
+    id: tmax_plus
+    on_press:
+      then:
+      # zavolame button template topeni max plus
+       - button.press: top_max_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 11
+    id: tmax_minus
+    on_press:
+      then:
+      # zavolame button template topeni max minus
+       - button.press: top_max_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  #---------- Topeni MIN teplota -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 14
+    id: tmin_plus
+    on_press:
+      then:
+      # zavolame button template topeni min plus
+       - button.press: top_min_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 18
+    id: tmin_minus
+    on_press:
+      then:
+      # zavolame button template topeni min minus
+       - button.press: top_min_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+  
+  #---------- Topeni krivka deni -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 15
+    id: krivd_plus
+    on_press:
+      then:
+      # zavolame button template topeni krivka den plus
+       - button.press: top_krivd_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 4
+    component_id: 19
+    id: krivd_minus
+    on_press:
+      then:
+      # zavolame button template topeni krivka den minus
+       - button.press: top_krivd_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+       
+  #---------- Topeni krivka noc -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 15
+    id: krivn_plus
+    on_press:
+      then:
+      # zavolame button template topeni krivka den plus
+       - button.press: top_krivn_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 16
+    id: krivn_minus
+    on_press:
+      then:
+      # zavolame button template topeni krivka den minus
+       - button.press: top_krivn_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+       
+  #---------- Topeni cas hodina den -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 7
+    id: hodden_plus
+    on_press:
+      then:
+      # zavolame button template topeni hodina den plus
+       - button.press: top_hodden_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 11
+    id: hodden_minus
+    on_press:
+      then:
+      # zavolame button template topeni hodina den minus
+       - button.press: top_hodden_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+       
+  #---------- Topeni cas minuta den -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 8
+    id: minden_plus
+    on_press:
+      then:
+      # zavolame button template topeni minuta den plus
+       - button.press: top_minden_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 12
+    id: minden_minus
+    on_press:
+      then:
+      # zavolame button template topeni minuta den minus
+       - button.press: top_minden_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+       
+  #---------- Topeni cas hodina noc -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 9
+    id: hodnoc_plus
+    on_press:
+      then:
+      # zavolame button template topeni hodina noc plus
+       - button.press: top_hodnoc_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 13
+    id: hodnoc_minus
+    on_press:
+      then:
+      # zavolame button template topeni hodina noc minus
+       - button.press: top_hodnoc_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+       
+  #---------- Topeni cas minuta noc -------------------
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 10
+    id: minnoc_plus
+    on_press:
+      then:
+      # zavolame button template topeni minuta noc plus
+       - button.press: top_minnoc_plus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 5
+    component_id: 14
+    id: minnoc_minus
+    on_press:
+      then:
+      # zavolame button template topeni minuta noc minus
+       - button.press: top_minnoc_minus
+       - rtttl.play: ‘pip:d=4,o=5,b=100:16e6'
+  
+  #----------------- restart tlacitko ------------------     
+  - platform: nextion
+    nextion_id: nextion1
+    page_id: 1
+    component_id: 5
+    id: restnext
+    on_press:
+      then:
+        - switch.turn_on: restartdev
+        
+
+       
+button:
+# -------------------------------------Template--------------------------------------------------
+  #----------- Template topeni END -----------------------------
+  - platform: template
+    name: Topeni end plus
+    id: top_end_plus
+    on_press:
+      then:
+        lambda: |-
+          id(topeni_end) += 1;
+          id(nextion1).set_component_value("topeni.teplotaend", id(topeni_end));
+                    
+  - platform: template
+    name: Topeni end minus
+    id: top_end_minus
+    on_press:
+      then:
+        lambda: |-
+          id(topeni_end) -= 1;
+          id(nextion1).set_component_value("topeni.teplotaend", id(topeni_end));
+                    
+  #----------- Template topeni MAX -----------------------------
+  - platform: template
+    name: Topeni max plus
+    id: top_max_plus
+    on_press:
+      then:
+        lambda: |-
+          id(topeni_max) += 1;
+          id(nextion1).set_component_value("topeni.teplotamax", id(topeni_max));
+                    
+  - platform: template
+    name: Topeni max minus
+    id: top_max_minus
+    on_press:
+      then:
+        lambda: |-
+          id(topeni_max) -= 1;
+          id(nextion1).set_component_value("topeni.teplotamax", id(topeni_max));
+                    
+  #----------- Template topeni MIN -----------------------------
+  - platform: template
+    name: Topeni min plus
+    icon: mdi:plus
+    id: top_min_plus
+    on_press:
+      then:
+        lambda: |-
+          id(topeni_min) += 1;
+          id(nextion1).set_component_value("topeni.teplotamin", id(topeni_min));
+                    
+  - platform: template
+    name: Topeni min minus
+    icon: mdi:minus
+    id: top_min_minus
+    on_press:
+      then:
+        lambda: |-
+          id(topeni_min) -= 1;
+          id(nextion1).set_component_value("topeni.teplotamin", id(topeni_min));
+                    
+  #----------- Template topeni krivka deni -----------------------------
+  - platform: template
+    name: Topeni KrivDen plus
+    id: top_krivd_plus
+    on_press:
+      then:
+        lambda: |-
+          id(ekvitermaDen) += 1;
+          id(nextion1).set_component_value("topeni.krivkaden", id(ekvitermaDen));
+          if (id(topeni_dn).state == true) {
+            id(ekvitermaA) = id(ekvitermaDen);
+          }
+                    
+  - platform: template
+    name: Topeni KrivDen minus
+    id: top_krivd_minus
+    on_press:
+      then:
+        lambda: |-
+          id(ekvitermaDen) -= 1;
+          id(nextion1).set_component_value("topeni.krivkaden", id(ekvitermaDen));
+          if (id(topeni_dn).state == true) {
+            id(ekvitermaA) = id(ekvitermaDen);
+          }
+                    
+  #----------- Template topeni krivka noc -----------------------------
+  - platform: template
+    name: Topeni KrivNoc plus
+    id: top_krivn_plus
+    on_press:
+      then:
+        lambda: |-
+          id(ekvitermaNoc) += 1;
+          id(nextion1).set_component_value("topenicas.krivkanoc", id(ekvitermaNoc));
+          if (id(topeni_dn).state == false) {
+            id(ekvitermaA) = id(ekvitermaNoc);
+          }
+                    
+  - platform: template
+    name: Topeni KrivNoc minus
+    id: top_krivn_minus
+    on_press:
+      then:
+        lambda: |-
+          id(ekvitermaNoc) -= 1;
+          id(nextion1).set_component_value("topenicas.krivkanoc", id(ekvitermaNoc));
+          if (id(topeni_dn).state == false) {
+            id(ekvitermaA) = id(ekvitermaNoc);
+          }
+                    
+  #---------------- Template pro cas topeni den ------------------------
+  #------- hodiny------------
+  - platform: template
+    name: Topeni hod den plus
+    id: top_hodden_plus
+    on_press:
+      then:
+        lambda: |-
+          if (id(hod_den) == 23) {
+            id(hod_den) = 0;
+          } else {
+            id(hod_den) += 1;
+          }
+          id(nextion1).set_component_value("topenicas.hodden", id(hod_den));
+                    
+  - platform: template
+    name: Topeni hod den minus
+    id: top_hodden_minus
+    on_press:
+      then:
+        lambda: |-
+          if (id(hod_den) == 0) {
+            id(hod_den) = 23;
+          } else {
+            id(hod_den) -= 1;
+          }
+          id(nextion1).set_component_value("topenicas.hodden", id(hod_den));
+                    
+  #------- minuty ------------
+  - platform: template
+    name: Topeni min den plus
+    id: top_minden_plus
+    on_press:
+      then:
+        lambda: |-
+          if (id(min_den) == 59) {
+            id(min_den) = 0;
+          } else {
+            id(min_den) += 1;
+          }
+          id(nextion1).set_component_value("topenicas.minden", id(min_den));
+                    
+  - platform: template
+    name: Topeni min den minus
+    id: top_minden_minus
+    on_press:
+      then:
+        lambda: |-
+          if (id(min_den) == 0) {
+            id(min_den) = 59;
+          } else {
+            id(min_den) -= 1;
+          }
+          id(nextion1).set_component_value("topenicas.minden", id(min_den));
+                    
+  #---------------- Template pro cas topeni noc ------------------------
+  #------- hodiny------------
+  - platform: template
+    name: Topeni hod noc plus
+    id: top_hodnoc_plus
+    on_press:
+      then:
+        lambda: |-
+          if (id(hod_noc) == 23) {
+            id(hod_noc) = 0;
+          } else {
+            id(hod_noc) += 1;
+          }
+          id(nextion1).set_component_value("topenicas.hodnoc", id(hod_noc));
+                    
+  - platform: template
+    name: Topeni hod noc minus
+    id: top_hodnoc_minus
+    on_press:
+      then:
+        lambda: |-
+          if (id(hod_noc) == 0) {
+            id(hod_noc) = 23;
+          } else {
+            id(hod_noc) -= 1;
+          }
+          id(nextion1).set_component_value("topenicas.hodnoc", id(hod_noc));
+                    
+  #------- minuty ------------
+  - platform: template
+    name: Topeni min noc plus
+    id: top_minnoc_plus
+    on_press:
+      then:
+        lambda: |-
+          if (id(min_noc) == 59) {
+            id(min_noc) = 0;
+          } else {
+            id(min_noc) += 1;
+          }
+          id(nextion1).set_component_value("topenicas.minnoc", id(min_noc));
+                    
+  - platform: template
+    name: Topeni min noc minus
+    id: top_minnoc_minus
+    on_press:
+      then:
+        lambda: |-
+          if (id(min_noc) == 0) {
+            id(min_noc) = 59;
+          } else {
+            id(min_noc) -= 1;
+          }
+          id(nextion1).set_component_value("topenicas.minnoc", id(min_noc));
+  
+
+#---------------sekce rele atd -------------------------------      
+switch:
+# ------------- Restart tlacitko na webu a HA -----------------
+  - platform: restart
+    name: "$devicename Restart"
+    id: restartdev
+
+  #--------------- teplate pro topeni ZAP/VYP -----------------    
+  - platform: template
+    name: "$devicename topení Zap/Vyp"
+    id: topeni_zap
+    #restore_state: true
+    turn_on_action:
+      - switch.template.publish:
+          id: topeni_zap
+          state: ON
+          
+    turn_off_action:
+      - switch.template.publish:
+          id: topeni_zap
+          state: OFF
+    
+    on_turn_on:
+      then:
+        - lambda: |-
+            id(nextion1).set_component_text("topeni.zapvypt", "Zapnuto");
+            id(nextion1).set_component_value("topeni.zapvypt", 0);
+            ESP_LOGD("main", "topeni zapnuto");            
+        - switch.turn_on: cerpadlo_topeni
+        - delay: 250 ms
+      
+    on_turn_off:
+      then:
+        - lambda: |-
+            id(nextion1).set_component_text("topeni.zapvypt", "Vypnuto");
+            id(nextion1).set_component_value("topeni.zapvypt", 1);
+            ESP_LOGD("main", "topeni vypnuto");            
+        - switch.turn_off: cerpadlo_topeni
+        - delay: 250 ms
+        
+  #--------------- template topeni den/noc --------------------
+  - platform: template
+    name: topeni Den/Noc
+    id: topeni_dn
+    #restore_state: true
+    turn_on_action:
+      - switch.template.publish:
+          id: topeni_dn
+          state: ON
+          
+    turn_off_action:
+      - switch.template.publish:
+          id: topeni_dn
+          state: OFF
+          
+    on_turn_on:
+      then:
+        - lambda: |-
+            id(ekvitermaA) = id(ekvitermaDen);
+            id(nextion1).set_component_text("topenicas.tdennoc", "Den");
+            id(nextion1).set_component_value("topenicas.tdennoc", 0);
+            ESP_LOGD("main", "Krivka ekvitermaA je: %f", id(ekvitermaA));
+            ESP_LOGD("main", "topeni den");
+                        
+    on_turn_off:
+      then:
+        - lambda: |-
+            id(ekvitermaA) = id(ekvitermaNoc);
+            id(nextion1).set_component_text("topenicas.tdennoc", "Noc");
+            id(nextion1).set_component_value("topenicas.tdennoc", 1);
+            ESP_LOGD("main", "Krivka ekvitermaA je: %f", id(ekvitermaA));
+            ESP_LOGD("main", "topeni noc");
+
+
+#--------------- switch na desce 4x rele ----------------------
+    
+  # rele na desce
+  - platform: gpio
+    name: "$devicename Servo otevrit"
+    restore_mode: ALWAYS_OFF
+    pin: GPIO25
+    id: servo_otevrit
+    on_turn_on:
+      - delay: ${cas_serva}
+      - switch.turn_off: servo_otevrit
+      - lambda: |-
+          id(nextion1).set_component_pic("kotel.picduomix", 0);// zobrazeni stavu duomixu na nextion
+          id(nextion1).set_component_pic("hlavni.picduomix", 0);// zobrazeni stavu duomixu na nextion     
+  
+  - platform: gpio
+    name: "$devicename Servo zavrit"
+    restore_mode: ALWAYS_OFF
+    pin: GPIO26
+    id: servo_zavrit
+    on_turn_on:
+      - delay: ${cas_serva}
+      - switch.turn_off: servo_zavrit
+      - lambda: |-
+          id(nextion1).set_component_pic("kotel.picduomix", 0);// zobrazeni stavu duomixu na nextion
+          id(nextion1).set_component_pic("hlavni.picduomix", 0);// zobrazeni stavu duomixu na nextion  
+
+  - platform: gpio
+    name: "$devicename Relay 3"
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin: GPIO33
+    id: relay3
+  
+  - platform: gpio
+    name: "$devicename cerpadlo topeni"
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin: GPIO32
+    inverted: false
+    id: cerpadlo_topeni
+    
+    
+    
+# popis zarizeni
+
+#ESP32R4
+
+# Rele na desce
+# 1 GPIO25 servo otevrit
+# 2 GPIO26 servo zavrit
+# 3 GPIO33 zaloha
+# 4 GPIO32 cerpadlo topeni
+
+# piny na desce
+# 5V               | 3V3
+# GND              | EN
+# IO2 - LED STAUS  | IO12
+# IO4 - BUZZER     | IO13
+# IO5              | IO14
+# IO16             | IO15
+# IO17             | IO18
+# IO19             w IO23
+
+# piny rf 433/315Mhz na desce
+# 5V
+# IO27
+# IO27
+# GND
+
+# piny I2C na desce
+# GND
+# 5V
+# SDA - IO21
+# SCL - IO22
+
+# piny esp prog na desce
+# 3V3
+# ESP VIN (3V3)
+# GND
+# RXD - IO3
+# TXD - IO1
+# pri flash musi byt odstranena propojka 3V3-ESP VIN, prpojit z prevodniku 3V3 na ESP VIN, pred pripojenim prevodniku tlacitko flash
+
+# tlacitka na desce
+# 1 GPIO34
+# 2 GPIO35
+# 3 GPIO36
+# 4 GPIO39
+
+# Nextion displey
+# 5V
+# TX - na esp32r4 v1 - IO16 - TX esp32r4 v3 - GPIO01
+# RX - na esp32r4 v1 - IO17 - RX esp32r4 v3 - GPIO03
+# GND
+# neni treba prevodnik urovni
+
+# uartattyna
+# RX - GPIO14 - pro 16MB verzi , pro 4MB verzi GPIO16
+# TX - GPIO15 - pro 16MB verzi , pro 4MB verzi GPIO17
+
+# PCF8574
+# 3V3
+# GND
+# SDA - IO21
+# SCL - IO22
+
+# 8xRele pripojene k PCF8574
+# 0
+# 1
+# 2
+# 3
+# 4
+# 5
+# 6
+# 7
+
+# Verze
+
+# 1.5.1
+# Zrusene cidla pres mqtt
+# Pripojena Attina84a na uart port ktera cte cidla DS18B20 a spaliny pres SPI 
+
+# 1.4.0
+# Zrusen Bojler a rosirena deska
+
+# 0.1.3
+# knihovna nextion v1.20.0b1
+# uz funkcni tlacitko na nextion
+
+# 0.1.4
+# funkcni zapinani vypinani topeni
+# funkcni nastaveni hodnoty - Topeni END
+# funkcni nastaveni hodnoty - Topeni MAX
+# funkcni nastaveni hodnoty - Topeni MIN
+# funkcni nastaveni hodnoty ekvitermaA - Topeni krivkaDen a krivkaNoc
+
+# 0.1.5
+# funkcni zapinani a vypinani topeni dle nastavene venkovni teplota - Topeni END
+# zprovoznene rizeni serva ekviterma
+# funkcni rizeni ekviterma Den/Noc zatim jen manual
+# funkcni tlacitko restart na nextion
+# funkcni nastaveni casu - Topeni DEN/NOC
+
+# 0.2.0
+# promazani kodu
+# funkcni automatizace prepinani krivky DEN/NOC dle nastaveneho casu
+
+# 0.2.1
+# funkcni tlacito nextion prepinani bojleru kotel/elektrika
+
+# 0.2.2
+# Pokud je manualne vypnuto topeni pres nextion nefunguje skrip (topeni_end)
+# interval mezi prepnutim bojler KOTEL/EL - vychozi 1min
+
+# 0.2.3
+# bojler nastaveni hodnot pro prepnuti na kotel/elektriku a prodlevu minutach
+
+# 0.2.4
+# vypnuti a zapnuti topeni dle teploty kotle
+# info o verzi ESHome
+
+# 0.2.5
+# zobrazeni na nextion - ephome verze a teplota akumulacky
+# TODO - rizeni bojleru dle teploty akumulacky
+
+# 1.0.0
+# rizeni bojleru dle teploty akumulacky
+# zobrazeni verze
+
+# 1.0.1
+# opraveno zobrazeni verze na nextion display
+
+# 1.0.2
+# opraveno prepinani bojleru mezi kotlem a elektrikou
+
+# 1.1.0
+# Vypnuti a zapnuti bojleru prez Nextion
+
+# 1.2.0
+# Prechod na aktualni knihovnu nextion display
+# Povolen upload tft souboru nextion display
+
+# 1.2.1
+# oprava tlacitka zap/vyp bojler
+# oprava tlactka bojler kotel/elektrina
+# prsunuto lambda po spusteni do nextion
+
+# 1.3.0
+# upravene uart piny pro ESP32R4 V3 nextion 
+# uparve I2C adressa pro externi rele desku
+
+# 1.3.1
+# zakazany logger na UART0
+# nextion na UART0
+
+# 1.3.2
+# zakazana api
+# pridana uvodni melodie
+
+# 1.3.3
+# pridan zvuk pri nastavovani paramnetru na nextion tlacitka
