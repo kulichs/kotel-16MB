@@ -1,0 +1,10 @@
+wifi_gateway: '10.10.20.1'
+wifi_subnet: '255.255.255.0'
+wifi_dns1: '10.10.20.1'
+wifi_dns2: '192.168.223.1'
+
+mqtt_broker: '10.10.20.1'
+
+time_servers: '10.10.20.1' # https://esphome.io/components/time.html?highlight=time
+time_zone: 'Europe/Prague'
+#logger_level: 'INFO' # INFO , NONE , DEBUG https://esphome.io/components/logger.html

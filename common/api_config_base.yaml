@@ -1,0 +1,3 @@
+api:
+  password: !secret api_password
+  reboot_timeout: 60min

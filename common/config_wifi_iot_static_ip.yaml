@@ -1,0 +1,13 @@
+wifi:
+  #fast_connect: on
+  ssid: !secret wifiiot_name
+  password: !secret wifiiot_password
+  reboot_timeout: 60min
+  #use_address: esp32-bel-sklep-cb118c-cb118c
+  #power_save_mode: none
+  manual_ip: 
+    static_ip: ${wifi_ip}
+    gateway: ${wifi_gateway}
+    subnet: ${wifi_subnet}
+    dns1: ${wifi_dns1}
+    dns2: ${wifi_dns2}

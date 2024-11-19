@@ -1,0 +1,6 @@
+mqtt:
+  broker: ${mqtt_broker}
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: esphome/${devicename}
+  reboot_timeout: 120min
