@@ -1,0 +1,4 @@
+platform: template
+name: Uptime v normalnim formatu
+id: uptime_human
+icon: mdi:clock-start
